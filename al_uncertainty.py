@@ -32,7 +32,10 @@ def create_json_inference(batch_bboxes, batch_cls_scores , batch_labels, batch_c
                 'category_id' : int(batch_labels[idx][ids]),
                 'cls_uncertainty': batch_cls_uncertainty[idx].tolist(),
                 'file_name': info_meta['name'][idx],
-                'image_id': info_meta['id'][idx]
+                'image_id': info_meta['id'][idx],
+                'width': info_meta['width'][idx],
+                'height': info_meta['height'][idx],
+                'score': float(batch_cls_scores[idx][ids])
             }
             json_content.append(item)
 
@@ -48,10 +51,15 @@ def dataloader_inference(file_paths):
     batch_instances['meta'] = OrderedDict()
     batch_instances['meta']['id'] = []
     batch_instances['meta']['name'] = []
+    batch_instances['meta']['width'] = []
+    batch_instances['meta']['height'] = []
     # batch_instances['img'] = []
     for idx, file_path in enumerate(file_paths):
+        img = cv2.imread(file_path)
         batch_instances['meta']['id'].append(idx)
         batch_instances['meta']['name'].append(file_path)
+        batch_instances['meta']['width'].append(img.shape[1])
+        batch_instances['meta']['height'].append(img.shape[0])
     return batch_instances
 
 
