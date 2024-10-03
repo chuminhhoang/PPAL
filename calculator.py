@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+import math
 def xywhr2xyxyxyxy(x):
     """
     Convert batched Oriented Bounding Boxes (OBB) from [xywh, rotation] to [xy1, xy2, xy3, xy4]. Rotation values should

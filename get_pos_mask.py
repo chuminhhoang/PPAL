@@ -8,40 +8,37 @@ def get_pos_mask(pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
         """Get in_gts mask, (b, max_num_obj, h*w)."""
         mask_in_gts = select_candidates_in_gts(anc_points, gt_bboxes)
         # Get anchor_align metric, (b, max_num_obj, h*w)
-        align_metric, overlaps = get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
+        align_metric, overlaps = get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt, bs, n_max_boxes)
         # Get topk_metric mask, (b, max_num_obj, h*w)
         mask_topk = select_topk_candidates(align_metric, topk_mask=mask_gt.expand(-1, -1, topk).bool())
         # Merge all mask to a final mask, (b, max_num_obj, h*w)
         mask_pos = mask_topk * mask_in_gts * mask_gt
 
         return mask_pos, align_metric, overlaps
-def select_candidates_in_gts(xy_centers, gt_bboxes):
+def select_candidates_in_gts(xy_centers, gt_bboxes, eps=1e-9):
         """
-        Select the positive anchor center in gt for rotated bounding boxes.
+        Select positive anchor centers within ground truth bounding boxes.
 
         Args:
-            xy_centers (Tensor): shape(h*w, 2)
-            gt_bboxes (Tensor): shape(b, n_boxes, 5)
+            xy_centers (torch.Tensor): Anchor center coordinates, shape (h*w, 2).
+            gt_bboxes (torch.Tensor): Ground truth bounding boxes, shape (b, n_boxes, 4).
+            eps (float, optional): Small value for numerical stability. Defaults to 1e-9.
 
         Returns:
-            (Tensor): shape(b, n_boxes, h*w)
-        """
-        # (b, n_boxes, 5) --> (b, n_boxes, 4, 2)
-        corners = xywhr2xyxyxyxy(gt_bboxes)
-        # (b, n_boxes, 1, 2)
-        a, b, _, d = corners.split(1, dim=-2)
-        ab = b - a
-        ad = d - a
+            (torch.Tensor): Boolean mask of positive anchors, shape (b, n_boxes, h*w).
 
-        # (b, n_boxes, h*w, 2)
-        ap = xy_centers - a
-        norm_ab = (ab * ab).sum(dim=-1)
-        norm_ad = (ad * ad).sum(dim=-1)
-        ap_dot_ab = (ap * ab).sum(dim=-1)
-        ap_dot_ad = (ap * ad).sum(dim=-1)
-        return (ap_dot_ab >= 0) & (ap_dot_ab <= norm_ab) & (ap_dot_ad >= 0) & (ap_dot_ad <= norm_ad)  # is_in_box
+        Note:
+            b: batch size, n_boxes: number of ground truth boxes, h: height, w: width.
+            Bounding box format: [x_min, y_min, x_max, y_max].
+        """
+        n_anchors = xy_centers.shape[0]
+        bs, n_boxes, _ = gt_bboxes.shape
+        lt, rb = gt_bboxes.view(-1, 1, 4).chunk(2, 2)  # left-top, right-bottom
+        bbox_deltas = torch.cat((xy_centers[None] - lt, rb - xy_centers[None]), dim=2).view(bs, n_boxes, n_anchors, -1)
+        # return (bbox_deltas.min(3)[0] > eps).to(gt_bboxes.dtype)
+        return bbox_deltas.amin(3).gt_(eps)
 #topk=13, num_classes=80, alpha=1.0, beta=6.0, eps=1e-9
-def get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt,bs, n_max_boxes, alpha=1.0, beta=6.0, eps=1e-9):
+def get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt , bs,n_max_boxes, alpha=0.5, beta=6.0 ):
         """Compute alignment metric given predicted and ground truth bounding boxes."""
         na = pd_bboxes.shape[-2]
         mask_gt = mask_gt.bool()  # b, max_num_obj, h*w
@@ -61,6 +58,7 @@ def get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt,bs, n_ma
 
         align_metric = bbox_scores.pow(alpha) * overlaps.pow(beta)
         return align_metric, overlaps
+
 def iou_calculation(gt_bboxes, pd_bboxes):
         """IoU calculation for horizontal bounding boxes."""
         return bbox_iou(gt_bboxes, pd_bboxes, xywh=False, CIoU=True).squeeze(-1).clamp_(0)

@@ -2,66 +2,177 @@ from bboxes_iou import bbox_overlaps
 from ultralytics import YOLO
 import torch
 from quality import Class_Quality
-import os
+import json
 import shutil
-from get_mask_gt import preprocess
 from get_pos_mask import get_pos_mask
-# from get_fg_mask import select_highest_overlaps
+from ultralytics.nn.tasks import DetectionModel
+import torch
+import cv2
+import numpy as np
+from ultralytics.utils.tal import make_anchors
+
+# from get_fg_mask import select_ghest_overlaps
 from iou import iou
+def dist2bbox(distance, anchor_points, xywh=True, dim=-1):
+    """Transform distance(ltrb) to box(xywh or xyxy)."""
+    lt, rb = distance.chunk(2, dim)
+    x1y1 = anchor_points - lt
+    x2y2 = anchor_points + rb
+    if xywh:
+        c_xy = (x1y1 + x2y2) / 2
+        wh = x2y2 - x1y1
+        return torch.cat((c_xy, wh), dim)  # xywh bbox
+    return torch.cat((x1y1, x2y2), dim)  # xyxy bbox
+def bbox_decode( anchor_points, pred_dist):
+            proj=torch.arange(16, dtype=torch.float)
+            """Decode predicted object bounding box coordinates from anchor points and distribution."""
+            b, a, c = pred_dist.shape  # batch, anchors, channels
+            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(proj.type(pred_dist.dtype))
+            # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+            # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
+            return dist2bbox(pred_dist, anchor_points, xywh=False)
+def select_highest_overlaps(mask_pos, overlaps, n_max_boxes):
+        """
+        Select anchor boxes with highest IoU when assigned to multiple ground truths.
 
+        Args:
+            mask_pos (torch.Tensor): Positive mask, shape (b, n_max_boxes, h*w).
+            overlaps (torch.Tensor): IoU overlaps, shape (b, n_max_boxes, h*w).
+            n_max_boxes (int): Maximum number of ground truth boxes.
 
-def load_bboxes_gt(file_path):
-    with open(file_path, 'r') as file:
-        lines = file.readlines()
+        Returns:
+            target_gt_idx (torch.Tensor): Indices of assigned ground truths, shape (b, h*w).
+            fg_mask (torch.Tensor): Foreground mask, shape (b, h*w).
+            mask_pos (torch.Tensor): Updated positive mask, shape (b, n_max_boxes, h*w).
 
-    bbox_list = []
-    for line in lines:
-        parts = line.strip().split() 
-        bbox = torch.tensor([float(part) for part in parts[1:]])  # Chuyển đổi sang float
-        bbox_list.append(bbox)
+        Note:
+            b: batch size, h: height, w: width.
+        """
+        # Convert (b, n_max_boxes, h*w) -> (b, h*w)
+        fg_mask = mask_pos.sum(-2)
+        if fg_mask.max() > 1:  # one anchor is assigned to multiple gt_bboxes
+            mask_multi_gts = (fg_mask.unsqueeze(1) > 1).expand(-1, n_max_boxes, -1)  # (b, n_max_boxes, h*w)
+            max_overlaps_idx = overlaps.argmax(1)  # (b, h*w)
 
-    bboxes_gt = torch.stack(bbox_list)
+            is_max_overlaps = torch.zeros(mask_pos.shape, dtype=mask_pos.dtype, device=mask_pos.device)
+            is_max_overlaps.scatter_(1, max_overlaps_idx.unsqueeze(1), 1)
 
-    return bboxes_gt
-def load_bboxes_pred(file_path):
-    # Load a model
-    # init Yolo_new_head (Uncertainty) in here after load pretrained weight 
-    model = YOLO("/home/mq/data_disk2T/Thang/runs/detect/train6/weights/best.pt")
-    # Chạy dự đoán
-    results = model.predict(source=file_path, save=False, show=True)
-    return results[0].boxes.xyxy, results[0].boxes.conf, results[0].boxes.cls
+            mask_pos = torch.where(mask_multi_gts, is_max_overlaps, mask_pos).float()  # (b, n_max_boxes, h*w)
+            fg_mask = mask_pos.sum(-2)
+        # Find each grid serve which gt(index)
+        target_gt_idx = mask_pos.argmax(-2)  # (b, h*w)
+        return target_gt_idx, fg_mask, mask_pos
+def letterbox(img, new_shape = (640, 640), color = (114, 114, 114), 
+              auto = False, scale_fill = False, scaleup = False, stride = 32):
+    
+    # Resize and pad image while meeting stride-multiple constraints
+    shape = img.shape[:2]  # current shape [height, width]
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+
+    # Scale ratio (new / old)
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    if not scaleup:  # only scale down, do not scale up (for better test mAP)
+        r = min(r, 1.0)
+
+    # Compute padding
+    ratio = r, r  # width, height ratios
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+    if auto:  # minimum rectangle
+        dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
+    elif scale_fill:  # stretch
+        dw, dh = 0.0, 0.0
+        new_unpad = (new_shape[1], new_shape[0])
+        ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
+
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
+
+    if shape[::-1] != new_unpad:  # resize
+        img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+    height, width = img.shape[:2]
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+    return img, dw, dh, width, height
+
+def pre(img0):
+    img0, w, h, width, height = letterbox(img0)
+    img0 = cv2.cvtColor(img0, cv2.COLOR_BGR2RGB)
+    img0 = img0 / 255.0
+    img0 = img0.transpose(2, 0, 1)
+    return img0, w, h, width, height
+
+def predict_img(image_path):
+    model  = DetectionModel()
+    model.load(torch.load('/home/mq/data_disk2T/Thang/best.pt'))
+    batch_images = []
+    for img_path in image_path:
+         img=cv2.imread(img_path)
+         x, w, h, width, height = pre(img)
+         x = torch.from_numpy(x).float()  # Chuyển đổi từ numpy thành tensor
+         batch_images.append(x)
+    batch_images = torch.stack(batch_images)
+    with torch.no_grad():
+        preds = model(batch_images)
+    return preds
 
 # tính loss cho từng ảnh 
-def single_loss(preds, batch, device, nc, stride, reg_max=16, quality_xi=0.6):
-    no=nc+reg_max*4
+def single_loss(batch, batch_size, num_classes, quality_xi=0.6):
+    image_path={item['file_name'] for item in batch}
+    preds=predict_img(image_path)
     feats = preds[1] if isinstance(preds, tuple) else preds
-    batch_size=feats[0].shape[0]
-    pred_bboxes , pred_scores = torch.cat([xi.view(batch_size, no, -1) for xi in feats], 2).split(
-            (reg_max * 4, nc), 1
-        )
+    model  = DetectionModel()
+    model.load(torch.load('/home/mq/data_disk2T/Thang/best.pt'))
+    m=model.model[-1]
+    nc=num_classes
+    no= nc + m.reg_max * 4
+    reg_max=m.reg_max
+    stride=m.stride
+    # print(feats[0].view(feats[0].shape[0], no, -1).shape)
+    pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], no, -1) for xi in feats], 2).split(
+                (reg_max * 4, nc), 1
+            )
+    anchor_points, stride_tensor = make_anchors(feats, stride, 0.5)
+    anc_points=anchor_points * stride_tensor
     pred_scores = pred_scores.permute(0, 2, 1).contiguous()
-    dtype = pred_scores.dtype
-    imgsz = torch.tensor(feats[0].shape[2:], device=device, dtype=dtype) * stride[0]  # image size (h,w)
-    targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
-    targets = preprocess(targets.to(device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
-    gt_labels , gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+    pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+    pred_bboxes = bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+    image_idx = torch.tensor([item["image_idx"] for item in batch])
+    labels = torch.tensor([item["labels"] for item in batch])
+    bboxes = torch.tensor([item["bbox"] for item in batch])
+    targets = torch.cat((image_idx.view(-1, 1), labels.view(-1, 1), bboxes), 1)
+    nl, ne = targets.shape
+    i = targets[:, 0]  
+    _, counts = i.unique(return_counts=True)
+    counts = counts.to(dtype=torch.int32)
+    out = torch.zeros(batch_size, counts.max(), ne - 1)
+    for j in range(batch_size):
+                matches = i == j
+                n = matches.sum()
+                if n:
+                    out[j, :n] = targets[matches, 1:]
+    gt_labels, gt_bboxes = out.split((1, 4), 2)  # cls, xyxy
     mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
     mask_pos, align_metric, overlaps = get_pos_mask(
             pred_scores, pred_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
         )
+    n_max_boxes = gt_bboxes.shape[1]
     target_gt_idx, fg_mask, mask_pos = select_highest_overlaps(mask_pos, overlaps, n_max_boxes)
+    print(fg_mask)
+    exit()
     iou= iou(pred_bboxes, gt_bboxes, fg_mask)
-    #đưa vào từng bath ảnh 
-    classwise_quality_list=[]
-    #     bboxes_pred , p, _labels=load_bboxes_pred(file)
-    #     bboxes_gt= load_bboxes_gt(file)
-    #     quality = torch.pow(p, quality_xi) * torch.pow(iou, 1. - quality_xi)
-    #     classwise_quality = torch.stack((_labels, quality), dim=-1) 
-    #     classwise_quality_list.append(classwise_quality)
-    quality=torch.stack(classwise_quality_list)
-    return quality
-def loss(bath, num_classes, base_momentum=0.999):
-    classwise_quality=single_loss(bath)
+    print("hi" +iou)
+    _labels = labels[fg_mask]
+    exit()
+    p = torch.sigmoid(cls_score[valid_inds])[torch.arange(iou.shape[0], dtype=torch.long).to(device=iou.device), _labels]
+    quality = torch.pow(p, quality_xi) * torch.pow(iou, 1. - quality_xi)
+    classwise_quality = torch.stack((_labels, quality), dim=-1)
+    return classwise_quality
+def loss(batch, batch_size, class_quality, class_momentum, num_classes,  base_momentum=0.999):
+    classwise_quality=single_loss(batch, batch_size, num_classes)
     with torch.no_grad():
             classwise_quality = torch.cat(classwise_quality, dim=0)
             _classes = classwise_quality[:, 0]
@@ -75,22 +186,33 @@ def loss(bath, num_classes, base_momentum=0.999):
                     collected_counts[i] += torch.ones_like(cq).sum()
                     collected_qualities[i] += cq.sum()
             avg_qualities = collected_qualities / (collected_counts + 1e-5)
-            quality=Class_Quality(num_classes, base_momentum)
-            quality.load_from_file()
-        
-            quality.class_quality = quality.class_momentum * quality.class_quality + \
-                        (1. - quality.class_momentum) * avg_qualities
-            quality.class_momentum = torch.where(
+            class_quality = class_momentum * class_quality + \
+                        (1. - class_momentum) * avg_qualities
+            class_momentum = torch.where(
                 avg_qualities > 0,
-                torch.zeros_like(quality.class_momentum) + quality.base_momentum,
-                quality.class_momentum * quality.base_momentum)
-            quality.save_to_file()
+                torch.zeros_like(class_momentum) + base_momentum,
+                class_momentum * base_momentum)
             
 def run():
-    batch=""
-    preds=""
-
-    
+    batch_idx=0
+    batch_size=5
+    num_classes=3
+    base_momentum = 0.999
+    class_quality = torch.zeros((num_classes,))
+    class_momentum=torch.ones((num_classes,)) * base_momentum
+    json_file_path = 'output_data.json'
+    with open(json_file_path, 'r') as file:
+        data = json.load(file)
+    batch = [item for item in data if item["batch_idx"] == batch_idx]
+    single_loss(batch, 8, 3)
+    while True: 
+        batch = [item for item in data if item["batch_idx"] == batch_idx]
+        if len(batch)==0: 
+              break
+        else:
+              class_quality, class_momentum = loss(batch, batch_size, class_quality, class_momentum, num_classes)
+    return class_quality
+run()
     
 
 
