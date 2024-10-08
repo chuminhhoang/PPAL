@@ -1,0 +1,116 @@
+[
+    {
+        "bbox": [
+            31.190658569335938,
+            53.23890686035156,
+            272.5500793457031,
+            200.573974609375
+        ],
+        "category_id": 0,
+        "cls_uncertainty": [
+            0.6382278800010681,
+            0.6449366807937622,
+            0.6826464533805847
+        ],
+        "file_name": "/home/mq/data_disk2T/Thang/runs/detect/predict/anh2.jpg",
+        "image_id": 0,
+        "width": 310,
+        "height": 210,
+        "score": 0.6641741991043091
+    },
+    {
+        "bbox": [
+            31.63673973083496,
+            52.420413970947266,
+            272.3068542480469,
+            200.6349639892578
+        ],
+        "category_id": 2,
+        "cls_uncertainty": [
+            0.6382278800010681,
+            0.6449366807937622,
+            0.6826464533805847
+        ],
+        "file_name": "/home/mq/data_disk2T/Thang/runs/detect/predict/anh2.jpg",
+        "image_id": 0,
+        "width": 310,
+        "height": 210,
+        "score": 0.6539977192878723
+    },
+    {
+        "bbox": [
+            33.25111389160156,
+            52.841102600097656,
+            271.07452392578125,
+            200.6461944580078
+        ],
+        "category_id": 1,
+        "cls_uncertainty": [
+            0.6382278800010681,
+            0.6449366807937622,
+            0.6826464533805847
+        ],
+        "file_name": "/home/mq/data_disk2T/Thang/runs/detect/predict/anh2.jpg",
+        "image_id": 0,
+        "width": 310,
+        "height": 210,
+        "score": 0.5723322033882141
+    },
+    {
+        "bbox": [
+            31.190658569335938,
+            53.23890686035156,
+            272.5500793457031,
+            200.573974609375
+        ],
+        "category_id": 0,
+        "cls_uncertainty": [
+            0.6382278800010681,
+            0.6449366807937622,
+            0.6826464533805847
+        ],
+        "file_name": "/home/mq/data_disk2T/Thang/runs/detect/predict/0a6ab326b646febbd63e87d75e72f529.jpg",
+        "image_id": 1,
+        "width": 310,
+        "height": 210,
+        "score": 0.6641741991043091
+    },
+    {
+        "bbox": [
+            31.63673973083496,
+            52.420413970947266,
+            272.3068542480469,
+            200.6349639892578
+        ],
+        "category_id": 2,
+        "cls_uncertainty": [
+            0.6382278800010681,
+            0.6449366807937622,
+            0.6826464533805847
+        ],
+        "file_name": "/home/mq/data_disk2T/Thang/runs/detect/predict/0a6ab326b646febbd63e87d75e72f529.jpg",
+        "image_id": 1,
+        "width": 310,
+        "height": 210,
+        "score": 0.6539977192878723
+    },
+    {
+        "bbox": [
+            33.25111389160156,
+            52.841102600097656,
+            271.07452392578125,
+            200.6461944580078
+        ],
+        "category_id": 1,
+        "cls_uncertainty": [
+            0.6382278800010681,
+            0.6449366807937622,
+            0.6826464533805847
+        ],
+        "file_name": "/home/mq/data_disk2T/Thang/runs/detect/predict/0a6ab326b646febbd63e87d75e72f529.jpg",
+        "image_id": 1,
+        "width": 310,
+        "height": 210,
+        "score": 0.5723322033882141
+    }
+]
