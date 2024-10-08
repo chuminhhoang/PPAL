@@ -31,27 +31,20 @@ for i, label_file in enumerate(labels_files):
 
     # Mở ảnh để lấy chiều cao và chiều rộng
     with Image.open(img_path) as img:
-        width, height = img.size
+        width, height = 640,640
 
     # Lặp qua từng dòng trong file label
     for line in lines:
         parts = list(map(float, line.strip().split()))
         if len(parts) >= 5:  # Kiểm tra có đủ thông tin
             label = int(parts[0])      # Nhãn
-            x_center = parts[1] * width  # Chuyển đổi về tọa độ ảnh
-            y_center = parts[2] * height
-            w = parts[3] * width
-            h = parts[4] * height
-
-            # Tính toạ độ bbox (x_min, y_min, x_max, y_max)
-            x_min = x_center - w / 2
-            y_min = y_center - h / 2
-            x_max = x_center + w / 2
-            y_max = y_center + h / 2
-            
+            x_center = parts[1]  # Chuyển đổi về tọa độ ảnh
+            y_center = parts[2] 
+            w = parts[3] 
+            h = parts[4] 
             # Tạo một đối tượng để lưu thông tin cho JSON
             bbox_data = {
-                "bbox": [x_min, y_min, x_max, y_max],
+                "bbox": [x_center, y_center, w, h],
                 "labels": label,
                 "batch_idx": batch_idx,
                 "image_idx": i % batch_size,  # Vị trí của ảnh trong batch

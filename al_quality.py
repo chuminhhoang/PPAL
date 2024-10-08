@@ -10,9 +10,72 @@ import torch
 import cv2
 import numpy as np
 from ultralytics.utils.tal import make_anchors
-
+from ultralytics.utils.tal import TaskAlignedAssigner
+from dataloader import DetectionTrainer
+from ultralytics.hub import HUB_WEB_ROOT, HUBTrainingSession
+from ultralytics.utils import (
+    ARGV,
+    ASSETS,
+    DEFAULT_CFG_DICT,
+    LOGGER,
+    RANK,
+    SETTINGS,
+    callbacks,
+    checks,
+    emojis,
+    yaml_load,
+)
+from ultralytics.utils import (
+    DEFAULT_CFG,
+    LOCAL_RANK,
+    LOGGER,
+    RANK,
+    TQDM,
+    __version__,
+    callbacks,
+    clean_url,
+    colorstr,
+    emojis,
+    yaml_save,
+)
 # from get_fg_mask import select_ghest_overlaps
-from iou import iou
+from calculator import bbox_iou
+def xywh2xyxy(x):
+    """
+    Convert bounding box coordinates from (x, y, width, height) format to (x1, y1, x2, y2) format where (x1, y1) is the
+    top-left corner and (x2, y2) is the bottom-right corner. Note: ops per 2 channels faster than per channel.
+
+    Args:
+        x (np.ndarray | torch.Tensor): The input bounding box coordinates in (x, y, width, height) format.
+
+    Returns:
+        y (np.ndarray | torch.Tensor): The bounding box coordinates in (x1, y1, x2, y2) format.
+    """
+    assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
+    y = torch.empty_like(x) if isinstance(x, torch.Tensor) else np.empty_like(x)  # faster than clone/copy
+    xy = x[..., :2]  # centers
+    wh = x[..., 2:] / 2  # half width-height
+    y[..., :2] = xy - wh  # top left xy
+    y[..., 2:] = xy + wh  # bottom right xy
+    return y
+def preprocess(targets, batch_size, scale_tensor):
+        """Preprocesses the target counts and matches with the input batch size to output a tensor."""
+        nl, ne = targets.shape
+        if nl == 0:
+            out = torch.zeros(batch_size, 0, ne - 1)
+        else:
+            i = targets[:, 0]  # image index
+            _, counts = i.unique(return_counts=True)
+            counts = counts.to(dtype=torch.int32)
+            out = torch.zeros(batch_size, counts.max(), ne - 1)
+            for j in range(batch_size):
+                matches = i == j
+                n = matches.sum()
+                if n:
+                    out[j, :n] = targets[matches, 1:]
+            out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
+        return out
+
 def dist2bbox(distance, anchor_points, xywh=True, dim=-1):
     """Transform distance(ltrb) to box(xywh or xyxy)."""
     lt, rb = distance.chunk(2, dim)
@@ -120,7 +183,7 @@ def predict_img(image_path):
 
 # tính loss cho từng ảnh 
 def single_loss(batch, batch_size, num_classes, quality_xi=0.6):
-    image_path={item['file_name'] for item in batch}
+    image_path = batch['im_file']
     preds=predict_img(image_path)
     feats = preds[1] if isinstance(preds, tuple) else preds
     model  = DetectionModel()
@@ -132,49 +195,70 @@ def single_loss(batch, batch_size, num_classes, quality_xi=0.6):
     stride=m.stride
     # print(feats[0].view(feats[0].shape[0], no, -1).shape)
     pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], no, -1) for xi in feats], 2).split(
-                (reg_max * 4, nc), 1
-            )
-    anchor_points, stride_tensor = make_anchors(feats, stride, 0.5)
-    anc_points=anchor_points * stride_tensor
+            (reg_max * 4, nc), 1
+        )
     pred_scores = pred_scores.permute(0, 2, 1).contiguous()
     pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-    pred_bboxes = bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
-    image_idx = torch.tensor([item["image_idx"] for item in batch])
-    labels = torch.tensor([item["labels"] for item in batch])
-    bboxes = torch.tensor([item["bbox"] for item in batch])
-    targets = torch.cat((image_idx.view(-1, 1), labels.view(-1, 1), bboxes), 1)
-    nl, ne = targets.shape
-    i = targets[:, 0]  
-    _, counts = i.unique(return_counts=True)
-    counts = counts.to(dtype=torch.int32)
-    out = torch.zeros(batch_size, counts.max(), ne - 1)
-    for j in range(batch_size):
-                matches = i == j
-                n = matches.sum()
-                if n:
-                    out[j, :n] = targets[matches, 1:]
-    gt_labels, gt_bboxes = out.split((1, 4), 2)  # cls, xyxy
+    
+    dtype = pred_scores.dtype
+    batch_size = pred_scores.shape[0]
+    imgsz = torch.tensor(feats[0].shape[2:],  dtype=dtype) * stride[0]  # image size (h,w)
+    anchor_points, stride_tensor = make_anchors(feats, stride, 0.5)
+    
+    # print(anchor_points.shape)
+    # exit()
+    anc_points=anchor_points * stride_tensor
+    
+    # Targets
+    targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+    targets = preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+    gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
     mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
-
+    pred_bboxes = bbox_decode(anchor_points, pred_distri)
+    
     mask_pos, align_metric, overlaps = get_pos_mask(
             pred_scores, pred_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
         )
+    
     n_max_boxes = gt_bboxes.shape[1]
     target_gt_idx, fg_mask, mask_pos = select_highest_overlaps(mask_pos, overlaps, n_max_boxes)
-    print(fg_mask)
-    exit()
-    iou= iou(pred_bboxes, gt_bboxes, fg_mask)
-    print("hi" +iou)
-    _labels = labels[fg_mask]
-    exit()
-    p = torch.sigmoid(cls_score[valid_inds])[torch.arange(iou.shape[0], dtype=torch.long).to(device=iou.device), _labels]
-    quality = torch.pow(p, quality_xi) * torch.pow(iou, 1. - quality_xi)
+    assigner=TaskAlignedAssigner(topk=10, num_classes=3, alpha=0.5, beta=6.0)
+    _, target_bboxes, target_scores, fg_mask, target_gt_idx = assigner(
+            pred_scores.detach().sigmoid(),
+            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            anchor_points * stride_tensor,
+            gt_labels,
+            gt_bboxes,
+            mask_gt,
+        )
+    
+    # print(target_bboxes)
+    # # print(pred_bboxes.shape)
+    # # print(fg_mask.shape)
+    # # print(target_bboxes)
+    # # print(pred_bboxes)
+    # exit()
+    fg_mask=fg_mask.bool()
+    # Lấy chỉ số của các giá trị khác 0
+    indices = target_scores[fg_mask].nonzero()
+    # Tạo tensor chứa chỉ số cột tương ứng với các giá trị khác 0
+    values = target_scores[fg_mask][indices[:, 0], indices[:, 1]]
+    target_scores_sum = target_scores.sum()
+    target_bboxes /= stride_tensor
+    iou=bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+    _labels = torch.argmax(target_scores[fg_mask], dim=1)
+    p = values
+    quality =1- torch.pow(p, quality_xi) * torch.pow(iou.squeeze(-1), 1. - quality_xi)
+
     classwise_quality = torch.stack((_labels, quality), dim=-1)
+    # print(classwise_quality)
+    # exit()
     return classwise_quality
+
 def loss(batch, batch_size, class_quality, class_momentum, num_classes,  base_momentum=0.999):
-    classwise_quality=single_loss(batch, batch_size, num_classes)
+    classwise_quality =single_loss(batch, batch_size, num_classes)
     with torch.no_grad():
-            classwise_quality = torch.cat(classwise_quality, dim=0)
+            # classwise_quality = torch.cat(classwise_quality, dim=0)
             _classes = classwise_quality[:, 0]
             _qualities = classwise_quality[:, 1]
 
@@ -192,7 +276,7 @@ def loss(batch, batch_size, class_quality, class_momentum, num_classes,  base_mo
                 avg_qualities > 0,
                 torch.zeros_like(class_momentum) + base_momentum,
                 class_momentum * base_momentum)
-            
+    return class_quality, class_momentum  
 def run():
     batch_idx=0
     batch_size=5
@@ -200,18 +284,23 @@ def run():
     base_momentum = 0.999
     class_quality = torch.zeros((num_classes,))
     class_momentum=torch.ones((num_classes,)) * base_momentum
-    json_file_path = 'output_data.json'
-    with open(json_file_path, 'r') as file:
-        data = json.load(file)
-    batch = [item for item in data if item["batch_idx"] == batch_idx]
-    single_loss(batch, 8, 3)
-    while True: 
-        batch = [item for item in data if item["batch_idx"] == batch_idx]
-        if len(batch)==0: 
-              break
-        else:
-              class_quality, class_momentum = loss(batch, batch_size, class_quality, class_momentum, num_classes)
-    return class_quality
+    a = YOLO('/home/mq/data_disk2T/Thang/best.pt')
+    train_loader = a.return_dataset(data = '/home/mq/data_disk2T/Thang/bak/src/data1/data.yaml')
+    for i, batch in train_loader:
+        class_quality, class_momentum = loss(batch, batch_size, class_quality, class_momentum, num_classes)
+        print(class_quality, class_momentum)
+        print(i)
+    
+    
+    
+    
+    # while True: 
+    #     batch = [item for item in data if item["batch_idx"] == batch_idx]
+    #     if len(batch)==0: 
+    #           break
+    #     else:
+    #           class_quality, class_momentum = loss(batch, batch_size, class_quality, class_momentum, num_classes)
+    # return class_quality
 run()
     
 
