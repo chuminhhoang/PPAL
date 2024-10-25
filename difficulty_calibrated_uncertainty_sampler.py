@@ -7,30 +7,36 @@ from collections import OrderedDict
 
 # rewrite in config file
 CLASSES=[]
-n_images = 200
+n_images = 30
 score_thr = 0.5
 
-def _get_classwise_weight(self, results_json):
-        ckpt_path = os.path.join(
-           os.path.dirname(results_json), 'latest.pth'
-        )
-        ckpt = torch.load(ckpt_path, map_location='cpu')
-        # replace this by Yolo head.class_quality
-        class_qualities = ckpt['state_dict']['bbox_head.class_quality'].numpy()
-        reverse_q = 1 - class_qualities
-        b = np.exp(1. / self.class_weight_alpha) - 1
-        _weights = 1 + self.class_weight_alpha * np.log(b * reverse_q + 1) * self.class_weight_ub
+def get_class_qualities(file_path):
+    # Đọc nội dung file JSON
+    with open(file_path, 'r') as f:
+        data = json.load(f)
+    # Lấy danh sách class_quality từ file JSON
+    class_qualities = data["class_quality"]
 
-        class_weights = dict()
-        for i in range(len(_weights)):
-            cid = self.class_name2id[self.CLASSES[i]]
-            class_weights[cid] = _weights[i]
-        return class_weights
+    return np.array(class_qualities)
+
+def _get_classwise_weight(file_path):
+    class_weight_alpha= 0.3
+    class_weight_ub= 0.2
+    class_qualities=get_class_qualities(file_path)
+    reverse_q = 1 - class_qualities
+    b = np.exp(1. / class_weight_alpha) - 1
+    _weights = 1 + class_weight_alpha * np.log(b * reverse_q + 1) * class_weight_ub
+
+    class_weights = dict()
+    for i in range(len(_weights)):
+            class_weights[i] = _weights[i]
+    # print( class_weights)
+    return class_weights
     
 
-def al_acquisition(self, result_json, last_label_path):
+def al_acquisition(result_json, classweight_json):
 
-        # class_weights = self._get_classwise_weight(result_json)
+        class_weights = _get_classwise_weight(classweight_json)
         # class_weights['0']
 
         with open(result_json) as f:
@@ -96,11 +102,14 @@ def al_acquisition(self, result_json, last_label_path):
             merged_img_uncertainties.append(v)
         img_ids = np.array(img_ids)
         merged_img_uncertainties = np.array(merged_img_uncertainties)
-
         inds_sort = np.argsort(-1. * merged_img_uncertainties)
+
         sampled_inds = inds_sort[:n_images]
         unsampled_img_ids = inds_sort[n_images:]
         sampled_img_ids = img_ids[sampled_inds].tolist()
         unsampled_img_ids = img_ids[unsampled_img_ids].tolist()
 
         return sampled_img_ids, unsampled_img_ids
+
+sampled_img_ids, unsampled_img_ids = al_acquisition('/home/mq/data_disk2T/Thang/MTagi/uncertainty.json', '/home/mq/data_disk2T/Thang/MTagi/class_quality.json')
+print(sampled_img_ids)

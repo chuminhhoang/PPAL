@@ -1,4 +1,31 @@
+import json
+import glob
+import numpy as np
 
+# from mmdet.ppal.builder import SAMPLER
+# from mmdet.ppal.sampler.al_sampler_base import BaseALSampler
+# from mmdet.ppal.utils.running_checks import sys_echo
+
+
+eps = 1e-10
+
+
+# @SAMPLER.register_module()
+# class DiversitySampler(BaseALSampler):
+#     def __init__(
+#         self,
+#         n_sample_images,
+#         oracle_annotation_path,
+#         dataset_type,
+#     ):
+#         super(DiversitySampler, self).__init__(
+#             n_sample_images,
+#             oracle_annotation_path,
+#             is_random=False,
+#             dataset_type=dataset_type)
+
+#         self.log_init_info()
+        
 def k_centroid_greedy(dis_matrix, K):
         N = dis_matrix.shape[0]
         centroids = []
@@ -16,16 +43,16 @@ def k_centroid_greedy(dis_matrix, K):
 
 def kmeans(dis_matrix, K, n_iter=100):
         N = dis_matrix.shape[0]
-        centroids = DiversitySampler.k_centroid_greedy(dis_matrix, K)
+        centroids = k_centroid_greedy(dis_matrix, K)
         data_indices = np.arange(N)
 
         assign_dis_records = []
+        
         for _ in range(n_iter):
             centroid_dis = dis_matrix[:, centroids]
             cluster_assign = np.argmin(centroid_dis, axis=1)
             assign_dis = centroid_dis.min(axis=1).sum()
             assign_dis_records.append(assign_dis)
-
             new_centroids = []
             for i in range(K):
                 cluster_i = data_indices[cluster_assign == i]
@@ -37,31 +64,40 @@ def kmeans(dis_matrix, K, n_iter=100):
         return centroids.tolist()
 
 
-def al_acquisition(self, image_dis_path, last_label_path):
+def al_acquisition(image_dis_path, uncertainty_txt):
+        
+        uncertainty_label_path = []
         with open(image_dis_path, 'rb') as frb:
             image_dis_matrix = np.load(frb)
             image_ids = np.load(frb).reshape(-1)
 
-        centroids = DiversitySampler.kmeans(image_dis_matrix, K=self.n_images)
-
-        with open(last_label_path) as f:
-            results = json.load(f)
-
-        last_labeled_img_ids = [x['id'] for x in results['images']]
-        image_hit = dict()
-        for img_id in self.oracle_data.keys():
-            image_hit[img_id] = 0
-        for img_id in last_labeled_img_ids:
-            image_hit[img_id] = 1
+        centroids = kmeans(image_dis_matrix, K= 15)
+        with open(uncertainty_txt, 'r') as f:
+            temp = f.readlines()
+        
+        for path in temp:
+            uncertainty_label_path.append(path.strip())
 
         rest_image_ids = []
-        for img_id in self.oracle_data.keys():
-            if image_hit[img_id] == 0:
-                rest_image_ids.append(img_id)
-
+        for ids in image_ids:
+              rest_image_ids.append(int(ids))
+       
         sampled_img_ids = image_ids[centroids].tolist()
         for img_id in sampled_img_ids:
             rest_image_ids.remove(img_id)
         unsampled_img_ids = rest_image_ids
+        
+        sampled_path = []
+        unsampled_path = []
+        for sam_ids in sampled_img_ids:
+            sampled_path.append(uncertainty_label_path[int(sam_ids)])
+        for unsam_ids in unsampled_img_ids:
+            unsampled_path.append(uncertainty_label_path[int(unsam_ids)])
+        return sampled_path, unsampled_path
 
-        return sampled_img_ids, unsampled_img_ids
+a = glob.glob('/home/mq/data_disk2T/Thang/bak/src/data1/val/images/*.jpg')
+
+sampled_path, unsampled_path =  al_acquisition('/home/mq/data_disk2T/Thang/MTagi/new.npy', '/home/mq/data_disk2T/Thang/MTagi/out.txt')
+
+print(sampled_path)
+print(unsampled_path)

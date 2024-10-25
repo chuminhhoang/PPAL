@@ -1,14 +1,16 @@
+
 from bboxes_iou import bbox_overlaps
-from ultralytics import YOLO
+from ultra.ultralytics.models.yolo.model import YOLO
 import torch
 from quality import Class_Quality
 import json
 import shutil
 from get_pos_mask import get_pos_mask
-from ultralytics.nn.tasks import DetectionModel
+from ultra.ultralytics.nn import DetectionModel
 import torch
 import cv2
 import numpy as np
+from torchvision.ops import nms
 from ultralytics.utils.tal import make_anchors
 from ultralytics.utils.tal import TaskAlignedAssigner
 from dataloader import DetectionTrainer
@@ -58,6 +60,7 @@ def xywh2xyxy(x):
     y[..., :2] = xy - wh  # top left xy
     y[..., 2:] = xy + wh  # bottom right xy
     return y
+
 def preprocess(targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
         nl, ne = targets.shape
@@ -87,13 +90,14 @@ def dist2bbox(distance, anchor_points, xywh=True, dim=-1):
         return torch.cat((c_xy, wh), dim)  # xywh bbox
     return torch.cat((x1y1, x2y2), dim)  # xyxy bbox
 def bbox_decode( anchor_points, pred_dist):
-            proj=torch.arange(16, dtype=torch.float)
+            proj=torch.arange(16, dtype=torch.float).cpu()
             """Decode predicted object bounding box coordinates from anchor points and distribution."""
             b, a, c = pred_dist.shape  # batch, anchors, channels
             pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(proj.type(pred_dist.dtype))
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
             return dist2bbox(pred_dist, anchor_points, xywh=False)
+
 def select_highest_overlaps(mask_pos, overlaps, n_max_boxes):
         """
         Select anchor boxes with highest IoU when assigned to multiple ground truths.
@@ -125,6 +129,7 @@ def select_highest_overlaps(mask_pos, overlaps, n_max_boxes):
         # Find each grid serve which gt(index)
         target_gt_idx = mask_pos.argmax(-2)  # (b, h*w)
         return target_gt_idx, fg_mask, mask_pos
+
 def letterbox(img, new_shape = (640, 640), color = (114, 114, 114), 
               auto = False, scale_fill = False, scaleup = False, stride = 32):
     
@@ -167,14 +172,12 @@ def pre(img0):
     img0 = img0.transpose(2, 0, 1)
     return img0, w, h, width, height
 
-def predict_img(image_path):
-    model  = DetectionModel()
-    model.load(torch.load('/home/mq/data_disk2T/Thang/best.pt'))
+def predict_img(model, image_path):
     batch_images = []
     for img_path in image_path:
          img=cv2.imread(img_path)
          x, w, h, width, height = pre(img)
-         x = torch.from_numpy(x).float()  # Chuyển đổi từ numpy thành tensor
+         x = torch.from_numpy(x).to('cpu').float()  # Chuyển đổi từ numpy thành tensor
          batch_images.append(x)
     batch_images = torch.stack(batch_images)
     with torch.no_grad():
@@ -184,27 +187,24 @@ def predict_img(image_path):
 # tính loss cho từng ảnh 
 def single_loss(model, batch, num_classes, quality_xi=0.6):
     image_path = batch['im_file']
-    preds=predict_img(image_path)
+
+    preds =predict_img(model, image_path)
     feats = preds[1] if isinstance(preds, tuple) else preds
     m=model.model[-1]
     nc=num_classes
     no= nc + m.reg_max * 4
     reg_max=m.reg_max
     stride=m.stride
-    # print(feats[0].view(feats[0].shape[0], no, -1).shape)
     pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], no, -1) for xi in feats], 2).split(
             (reg_max * 4, nc), 1
         )
     pred_scores = pred_scores.permute(0, 2, 1).contiguous()
     pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-    
+
     dtype = pred_scores.dtype
     batch_size = pred_scores.shape[0]
-    imgsz = torch.tensor(feats[0].shape[2:],  dtype=dtype) * stride[0]  # image size (h,w)
+    imgsz = torch.tensor(feats[0].shape[2:],  dtype=dtype) * stride[0].to('cpu') # image size (h,w)
     anchor_points, stride_tensor = make_anchors(feats, stride, 0.5)
-    
-    # print(anchor_points.shape)
-    # exit()
     anc_points=anchor_points * stride_tensor
     
     # Targets
@@ -213,7 +213,10 @@ def single_loss(model, batch, num_classes, quality_xi=0.6):
     gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
     mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
     pred_bboxes = bbox_decode(anchor_points, pred_distri)
-    
+    for idx, pred_bbox in enumerate(pred_bboxes):
+        max_values, _ = torch.max(pred_scores[idx], dim=1)
+        keep_ids = nms(pred_bbox, max_values, 0.3)
+        
     mask_pos, align_metric, overlaps = get_pos_mask(
             pred_scores, pred_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
         )
@@ -229,19 +232,22 @@ def single_loss(model, batch, num_classes, quality_xi=0.6):
             gt_bboxes,
             mask_gt,
         )
-    
     fg_mask=fg_mask.bool()
     # Lấy chỉ số của các giá trị khác 0
-    indices = target_scores[fg_mask].nonzero()
+
     # Tạo tensor chứa chỉ số cột tương ứng với các giá trị khác 0
-    values = target_scores[fg_mask][indices[:, 0], indices[:, 1]]
+    values, _labels = torch.max(target_scores[fg_mask], 1)
 
     target_bboxes /= stride_tensor
+  
     iou=bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-    _labels = torch.argmax(target_scores[fg_mask], dim=1)
-    p = values
-    quality =1- torch.pow(p, quality_xi) * torch.pow(iou.squeeze(-1), 1. - quality_xi)
-
+    # a = torch.pow(iou.squeeze(-1), 1. - quality_xi)
+    # with open('b.txt', 'w') as f:
+    #     for i in a:
+    #           f.write(str(i))
+    #     f.write('===============')
+    quality = torch.pow(values+0.001, quality_xi) * torch.pow(iou.squeeze(-1), 1. - quality_xi)
+    # print(quality)
     classwise_quality = torch.stack((_labels, quality), dim=-1)
     return classwise_quality
 
@@ -256,6 +262,9 @@ def loss(model, batch, class_quality, class_momentum, num_classes,  base_momentu
             collected_qualities = classwise_quality.new_full((num_classes,), 0)
             for i in range(num_classes):
                 cq = _qualities[_classes == i]
+                for idx in range(len(cq)):
+                     if torch.isnan(cq[idx]):
+                          cq[idx] = 0
                 if cq.numel() > 0:
                     collected_counts[i] += torch.ones_like(cq).sum()
                     collected_qualities[i] += cq.sum()
@@ -267,18 +276,17 @@ def loss(model, batch, class_quality, class_momentum, num_classes,  base_momentu
                 torch.zeros_like(class_momentum) + base_momentum,
                 class_momentum * base_momentum)
     return class_quality, class_momentum  
+
 def run():
     num_classes=3
     base_momentum = 0.999
     class_quality = torch.zeros((num_classes,))
     class_momentum=torch.ones((num_classes,)) * base_momentum
-    a = YOLO('/home/mq/data_disk2T/Thang/best.pt')
+    a = YOLO('/home/mq/data_disk2T/Thang/best.pt').to('cpu')
     train_loader = a.return_dataset(data = '/home/mq/data_disk2T/Thang/bak/src/data1/data.yaml')
-    model  = DetectionModel()
-    model.load(torch.load('/home/mq/data_disk2T/Thang/best.pt'))
+    model  = a.model
     for i, batch in train_loader:
         class_quality, class_momentum = loss(model, batch, class_quality, class_momentum, num_classes)
-        break
     return class_quality
 
 class_quality = run()
